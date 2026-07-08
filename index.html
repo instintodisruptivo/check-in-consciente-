@@ -1076,8 +1076,8 @@ async function exportPDF(code){
     printWin.document.body.innerHTML = '<p style="font-family:sans-serif;padding:24px;">No se pudo generar el reporte. Cierra esta ventana e intenta de nuevo.</p>';
   }
 }
+async function exportCSV(code){
   const records = await DB.getRecords(code);
-  const header = ["Fecha","Resultado","Hambre","Urgencia","Emocion","TiempoDesdeComer","SenalesFisicas","Necesidades","TiempoEmpleadoSeg","Dispositivo"];
   const rows = records.map(r=>[
     new Date(r.date).toLocaleString('es-MX'),
     r.resultLabel,
