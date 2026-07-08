@@ -365,36 +365,60 @@ const authReady = fsDb ? new Promise((resolve)=>{
   setTimeout(()=>{ if(!settled){ settled = true; resolve(null); } }, 8000);
 }) : Promise.resolve(null);
 
+function wait(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
 async function storageGet(key){
-  try{
-    if(!fsDb) throw new Error('Firestore no disponible');
-    await authReady;
-    const snap = await fsDb.collection('kv').doc(key).get();
-    if(snap.exists){
-      const value = snap.data().value;
-      localStorage.setItem('id_'+key, value);
-      return value;
-    }
-    return null;
-  }catch(e){
-    console.warn('Firestore get falló para', key, e);
+  if(!fsDb){
     const raw = localStorage.getItem('id_'+key);
-    return raw===null ? undefined : raw;
+    return raw===null ? null : raw;
   }
+  let lastError = null;
+  for(let attempt=0; attempt<3; attempt++){
+    try{
+      await authReady;
+      const snap = await fsDb.collection('kv').doc(key).get();
+      if(snap.exists){
+        const value = snap.data().value;
+        localStorage.setItem('id_'+key, value);
+        return value;
+      }
+      return null; // Confirmado: la llave no existe (no es un error de conexión)
+    }catch(e){
+      lastError = e;
+      console.warn(`Firestore get intento ${attempt+1}/3 falló para`, key, e);
+      if(attempt < 2) await wait(700 * (attempt+1));
+    }
+  }
+  // Se agotaron los reintentos: usamos caché local si existe, y si no,
+  // avisamos que fue un problema de conexión (no que "no existe").
+  const raw = localStorage.getItem('id_'+key);
+  if(raw !== null) return raw;
+  throw new Error('No se pudo conectar con la base de datos para leer "'+key+'": ' + (lastError && lastError.message));
 }
 
 async function storageSet(key, value){
-  try{
-    await authReady;
-    await fsDb.collection('kv').doc(key).set({
-      value,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
+  if(!fsDb){
     localStorage.setItem('id_'+key, value);
-  }catch(e){
-    console.warn('Firestore set falló para', key, e);
-    localStorage.setItem('id_'+key, value);
+    return;
   }
+  let lastError = null;
+  for(let attempt=0; attempt<3; attempt++){
+    try{
+      await authReady;
+      await fsDb.collection('kv').doc(key).set({
+        value,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      localStorage.setItem('id_'+key, value);
+      return;
+    }catch(e){
+      lastError = e;
+      console.warn(`Firestore set intento ${attempt+1}/3 falló para`, key, e);
+      if(attempt < 2) await wait(700 * (attempt+1));
+    }
+  }
+  localStorage.setItem('id_'+key, value);
+  throw new Error('No se pudo guardar en la base de datos compartida "'+key+'" (se guardó solo en este dispositivo): ' + (lastError && lastError.message));
 }
 
 const DB = {
@@ -433,7 +457,11 @@ const DB = {
     return patient;
   },
   async findPatient(code){
-    const list = await this.getPatients();
+    // A propósito NO usamos getPatients() aquí: esa función devuelve [] en
+    // silencio si falla la conexión, lo cual haría creer al paciente que
+    // su código "no existe" cuando en realidad fue un problema de red.
+    const v = await storageGet('patients');
+    const list = v ? JSON.parse(v) : [];
     return list.find(p=>p.code.toUpperCase() === code.toUpperCase()) || null;
   },
 
@@ -1163,25 +1191,36 @@ async function saveAuth(){
 async function render(){
   const app = document.getElementById('app');
   let html = '';
-  switch(S.screen){
-    case 'role': html = renderRole(); break;
-    case 'patient-login': html = renderPatientLogin(); break;
-    case 'patient-welcome': html = renderWelcome(); break;
-    case 'checkin-1': html = renderCheckin1(); break;
-    case 'checkin-2': html = renderCheckin2(); break;
-    case 'checkin-3': html = renderCheckin3(); break;
-    case 'checkin-4': html = renderCheckin4(); break;
-    case 'checkin-5': html = renderCheckin5(); break;
-    case 'checkin-6': html = renderCheckin6(); break;
-    case 'checkin-analyzing': html = renderAnalyzing(); break;
-    case 'result': html = renderResult(); break;
-    case 'patient-done': html = renderDone(); break;
-    case 'nutri-login': html = renderNutriLogin(); break;
-    case 'nutri-dash': html = await renderNutriDash(); break;
-    default: html = renderRole();
+  try{
+    switch(S.screen){
+      case 'role': html = renderRole(); break;
+      case 'patient-login': html = renderPatientLogin(); break;
+      case 'patient-welcome': html = renderWelcome(); break;
+      case 'checkin-1': html = renderCheckin1(); break;
+      case 'checkin-2': html = renderCheckin2(); break;
+      case 'checkin-3': html = renderCheckin3(); break;
+      case 'checkin-4': html = renderCheckin4(); break;
+      case 'checkin-5': html = renderCheckin5(); break;
+      case 'checkin-6': html = renderCheckin6(); break;
+      case 'checkin-analyzing': html = renderAnalyzing(); break;
+      case 'result': html = renderResult(); break;
+      case 'patient-done': html = renderDone(); break;
+      case 'nutri-login': html = renderNutriLogin(); break;
+      case 'nutri-dash': html = await renderNutriDash(); break;
+      default: html = renderRole();
+    }
+    if(S.toast) html += `<div class="toast" id="toast-el">${S.toast}</div>`;
+    app.innerHTML = html;
+  }catch(e){
+    console.error('Error al dibujar la pantalla:', e);
+    app.innerHTML = `<div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:28px; text-align:center; font-family:Manrope,sans-serif; color:#17161A;">
+      <div>
+        <div style="font-size:17px; font-weight:800; margin-bottom:8px;">Algo no cargó bien</div>
+        <div style="color:#4A484E; font-size:14px; line-height:1.5; margin-bottom:18px;">Puede ser un problema de conexión momentáneo.</div>
+        <button onclick="location.reload()" style="border:none; background:#17161A; color:#fff; border-radius:100px; padding:13px 22px; font-size:14px; font-weight:700;">Reintentar</button>
+      </div>
+    </div>`;
   }
-  if(S.toast) html += `<div class="toast" id="toast-el">${S.toast}</div>`;
-  app.innerHTML = html;
 }
 
 window.addEventListener('error', function(ev){
