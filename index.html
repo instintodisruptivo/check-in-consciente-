@@ -330,6 +330,11 @@ const firebaseConfig = {
 };
 firebase.initializeApp(firebaseConfig);
 const fsDb = firebase.firestore();
+/* Fuerza "long polling" en vez de streaming en tiempo real: en varias
+   redes móviles y wifis con proxy, el modo de streaming de Firestore se
+   queda colgado varios segundos antes de fallar. Long polling es un poco
+   menos "instantáneo" pero muchísimo más confiable en esas redes. */
+fsDb.settings({ experimentalForceLongPolling: true, merge: true });
 
 /* Espera a que exista una sesión (anónima) antes de leer/escribir, para
    que las reglas de seguridad "request.auth != null" no rechacen la
@@ -926,7 +931,7 @@ async function renderPatientDetail(code, patients){
       <h3 style="margin:0;">${patient.name} · ${patient.code}</h3>
       <div style="display:flex; gap:8px;">
         <button class="pill-btn" onclick="exportCSV('${code}')">Exportar CSV/Excel</button>
-        <button class="pill-btn" onclick="window.print()">Exportar PDF</button>
+        <button class="pill-btn" onclick="exportPDF('${code}')">Exportar PDF</button>
       </div>
     </div>
 
@@ -1010,7 +1015,67 @@ async function saveNotes(code){
   }
 }
 
-async function exportCSV(code){
+async function exportPDF(code){
+  const printWin = window.open('', '_blank');
+  if(!printWin){ showToast('Tu navegador bloqueó la ventana. Habilita ventanas emergentes e intenta de nuevo.'); return; }
+  printWin.document.write('<p style="font-family:sans-serif;padding:24px;">Generando reporte…</p>');
+  try{
+    const patients = await DB.getPatients();
+    const patient = patients.find(p=>p.code===code) || {name:code, code};
+    const records = (await DB.getRecords(code)).sort((a,b)=> new Date(a.date)-new Date(b.date));
+    const notes = await DB.getNotes(code);
+
+    const rowsHtml = records.map(r=>`<tr>
+      <td>${new Date(r.date).toLocaleString('es-MX',{dateStyle:'short',timeStyle:'short'})}</td>
+      <td>${RESULTS[r.result] ? RESULTS[r.result].tone : r.result}</td>
+      <td>${r.answers.hunger}</td>
+      <td>${r.answers.urgency}</td>
+      <td>${r.answers.emotion||'—'}</td>
+      <td>${r.device||''}</td>
+    </tr>`).join('');
+
+    const n = records.length;
+    const avgHunger = n? (records.reduce((a,r)=>a+r.answers.hunger,0)/n).toFixed(1) : '—';
+    const avgUrgency = n? (records.reduce((a,r)=>a+r.answers.urgency,0)/n).toFixed(1) : '—';
+
+    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+    <title>Reporte ${patient.name}</title>
+    <style>
+      body{font-family:-apple-system,Arial,sans-serif; color:#17161A; padding:28px; max-width:800px; margin:0 auto;}
+      h1{font-size:20px; margin-bottom:2px;} .sub{color:#666; font-size:13px; margin-bottom:20px;}
+      .stats{display:flex; gap:14px; margin-bottom:20px;}
+      .stat{background:#F3F1EF; border-radius:10px; padding:10px 14px; font-size:13px;}
+      .stat b{display:block; font-size:18px;}
+      table{width:100%; border-collapse:collapse; font-size:12px;}
+      th,td{border:1px solid #ddd; padding:6px 8px; text-align:left;}
+      th{background:#F3F1EF;}
+      .notes{background:#F3F1EF; padding:14px; border-radius:10px; margin-top:20px; font-size:13px; white-space:pre-wrap;}
+      @media print{ body{padding:10px;} }
+    </style></head>
+    <body>
+      <h1>${patient.name} · ${patient.code}</h1>
+      <div class="sub">Reporte generado el ${new Date().toLocaleString('es-MX')} · Instinto Disruptivo</div>
+      <div class="stats">
+        <div class="stat"><b>${n}</b>Registros</div>
+        <div class="stat"><b>${avgHunger}</b>Hambre prom.</div>
+        <div class="stat"><b>${avgUrgency}</b>Urgencia prom.</div>
+      </div>
+      <table>
+        <thead><tr><th>Fecha</th><th>Resultado</th><th>Hambre</th><th>Urgencia</th><th>Emoción</th><th>Dispositivo</th></tr></thead>
+        <tbody>${rowsHtml || '<tr><td colspan="6">Sin registros aún.</td></tr>'}</tbody>
+      </table>
+      ${notes? `<div class="notes"><b>Notas del nutriólogo:</b>\n${notes.replace(/</g,'&lt;')}</div>` : ''}
+    </body></html>`;
+
+    printWin.document.open();
+    printWin.document.write(html);
+    printWin.document.close();
+    setTimeout(()=>{ try{ printWin.focus(); printWin.print(); }catch(e){} }, 350);
+  }catch(e){
+    console.error(e);
+    printWin.document.body.innerHTML = '<p style="font-family:sans-serif;padding:24px;">No se pudo generar el reporte. Cierra esta ventana e intenta de nuevo.</p>';
+  }
+}
   const records = await DB.getRecords(code);
   const header = ["Fecha","Resultado","Hambre","Urgencia","Emocion","TiempoDesdeComer","SenalesFisicas","Necesidades","TiempoEmpleadoSeg","Dispositivo"];
   const rows = records.map(r=>[
