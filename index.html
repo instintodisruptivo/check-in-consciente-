@@ -328,30 +328,46 @@ const firebaseConfig = {
   messagingSenderId: "598297163633",
   appId: "1:598297163633:web:a553caf11cf634aa3de8d0"
 };
-firebase.initializeApp(firebaseConfig);
-const fsDb = firebase.firestore();
-/* Fuerza "long polling" en vez de streaming en tiempo real: en varias
-   redes móviles y wifis con proxy, el modo de streaming de Firestore se
-   queda colgado varios segundos antes de fallar. Long polling es un poco
-   menos "instantáneo" pero muchísimo más confiable en esas redes. */
-fsDb.settings({ experimentalForceLongPolling: true, merge: true });
+let fsDb = null;
+let firebaseInitError = null;
+try{
+  if(typeof firebase === 'undefined') throw new Error('El SDK de Firebase no cargó (revisa tu conexión, un bloqueador de contenido, o firewall de red).');
+  firebase.initializeApp(firebaseConfig);
+  fsDb = firebase.firestore();
+  /* Fuerza "long polling" en vez de streaming en tiempo real: en varias
+     redes móviles y wifis con proxy, el modo de streaming de Firestore se
+     queda colgado varios segundos antes de fallar. Long polling es un poco
+     menos "instantáneo" pero muchísimo más confiable en esas redes. */
+  fsDb.settings({ experimentalForceLongPolling: true, merge: true });
+}catch(e){
+  firebaseInitError = e;
+  console.error('No se pudo inicializar Firebase, la app seguirá funcionando solo en este dispositivo:', e);
+}
 
 /* Espera a que exista una sesión (anónima) antes de leer/escribir, para
    que las reglas de seguridad "request.auth != null" no rechacen la
-   primera llamada justo al cargar la página. */
-const authReady = new Promise((resolve)=>{
+   primera llamada justo al cargar la página. Si Firebase no está
+   disponible, resuelve de inmediato para no bloquear nada. */
+const authReady = fsDb ? new Promise((resolve)=>{
   let settled = false;
-  firebase.auth().onAuthStateChanged(user=>{
-    if(user && !settled){ settled = true; resolve(user); }
-  });
-  firebase.auth().signInAnonymously().catch(e=>{
-    console.error('No se pudo iniciar sesión anónima en Firebase:', e);
+  try{
+    firebase.auth().onAuthStateChanged(user=>{
+      if(user && !settled){ settled = true; resolve(user); }
+    });
+    firebase.auth().signInAnonymously().catch(e=>{
+      console.error('No se pudo iniciar sesión anónima en Firebase:', e);
+      if(!settled){ settled = true; resolve(null); }
+    });
+  }catch(e){
+    console.error('Error configurando autenticación:', e);
     if(!settled){ settled = true; resolve(null); }
-  });
-});
+  }
+  setTimeout(()=>{ if(!settled){ settled = true; resolve(null); } }, 8000);
+}) : Promise.resolve(null);
 
 async function storageGet(key){
   try{
+    if(!fsDb) throw new Error('Firestore no disponible');
     await authReady;
     const snap = await fsDb.collection('kv').doc(key).get();
     if(snap.exists){
@@ -1168,7 +1184,30 @@ async function render(){
   app.innerHTML = html;
 }
 
-render();
+window.addEventListener('error', function(ev){
+  console.error('Error global capturado:', ev.error || ev.message);
+  const app = document.getElementById('app');
+  if(app && app.innerHTML.trim() === ''){
+    app.innerHTML = `<div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:28px; text-align:center; font-family:Manrope,sans-serif; color:#17161A;">
+      <div>
+        <div style="font-size:17px; font-weight:800; margin-bottom:8px;">No se pudo cargar la app</div>
+        <div style="color:#4A484E; font-size:14px; line-height:1.5;">Intenta recargar la página. Si sigue igual, puede que tu red esté bloqueando algún recurso necesario (por ejemplo Firebase o las tipografías). Prueba con otra red (datos móviles en vez de wifi, o viceversa).</div>
+      </div>
+    </div>`;
+  }
+});
+
+try{
+  render();
+}catch(e){
+  console.error('Error al renderizar por primera vez:', e);
+  document.getElementById('app').innerHTML = `<div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:28px; text-align:center; font-family:Manrope,sans-serif; color:#17161A;">
+    <div>
+      <div style="font-size:17px; font-weight:800; margin-bottom:8px;">No se pudo cargar la app</div>
+      <div style="color:#4A484E; font-size:14px; line-height:1.5;">Ocurrió un error inesperado. Intenta recargar la página.</div>
+    </div>
+  </div>`;
+}
 </script>
 </body>
 </html>
